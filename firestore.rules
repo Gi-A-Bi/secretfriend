@@ -1,0 +1,69 @@
+rules_version = '2';
+
+// =====================================================================
+//  우리 반 비밀친구 — Firestore 보안 규칙
+//  ---------------------------------------------------------------------
+//  적용 방법: Firebase 콘솔 > Firestore Database > 규칙(Rules) 탭에
+//            이 내용을 전부 붙여넣고 [게시(Publish)]
+//
+//  원칙
+//   - 교사: 로그인(Auth)한 본인이 만든 학급의 데이터만 읽고 쓸 수 있음
+//   - 학생: 로그인 없이, '자기 코드' 문서 하나만 열어볼 수 있음
+//           (목록 조회는 금지 → 남의 코드 문서를 뒤질 수 없음)
+// =====================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 이 학급의 주인이 나인가?
+    function ownsClass(classId) {
+      return request.auth != null
+          && get(/databases/$(database)/documents/classes/$(classId)).data.teacherId == request.auth.uid;
+    }
+
+    // ---------------- 학급 ----------------
+    match /classes/{classId} {
+      allow read, update, delete: if request.auth != null
+                                  && resource.data.teacherId == request.auth.uid;
+      allow create: if request.auth != null
+                    && request.resource.data.teacherId == request.auth.uid;
+
+      // ---------------- 학생 명단 (교사 전용) ----------------
+      match /students/{studentId} {
+        allow read, write: if ownsClass(classId);
+      }
+
+      // ---------------- 배정 (교사 전용 — 학생은 절대 못 봄) ----------------
+      match /assignments/{assignmentId} {
+        allow read, write: if ownsClass(classId);
+      }
+
+      // ---------------- 활동 기록 ----------------
+      match /activities/{activityId} {
+        // 교사는 자기 학급 기록을 읽고 지울 수 있음
+        allow read, update, delete: if ownsClass(classId);
+
+        // 학생은 '올바른 코드'를 가진 경우에만 새 기록을 남길 수 있음
+        allow create: if request.resource.data.keys().hasAll(['code','classId','round','giverName','note'])
+                      && request.resource.data.classId == classId
+                      && request.resource.data.note is string
+                      && request.resource.data.note.size() > 0
+                      && request.resource.data.note.size() < 1000
+                      && exists(/databases/$(database)/documents/codes/$(request.resource.data.code))
+                      && get(/databases/$(database)/documents/codes/$(request.resource.data.code)).data.classId == classId;
+      }
+    }
+
+    // ---------------- 코드 문서 (학생이 보는 유일한 창구) ----------------
+    match /codes/{code} {
+      // 정확한 코드를 알아야만 그 문서 하나를 열 수 있음.
+      // list(목록 조회)는 허용하지 않으므로 남의 코드를 훑어볼 수 없음.
+      allow get: if true;
+      allow list: if false;
+
+      // 쓰기는 그 학급을 소유한 교사만
+      allow create: if ownsClass(request.resource.data.classId);
+      allow update, delete: if ownsClass(resource.data.classId);
+    }
+  }
+}
